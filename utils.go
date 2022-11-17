@@ -7,9 +7,11 @@ func nullif(str string) *string {
 	return &str
 }
 
-func coalesce(str *string) string {
-	if str == nil {
-		return ""
+func coalesce(strs ...*string) string {
+	for _, str := range strs {
+		if str != nil {
+			return *str
+		}
 	}
-	return *str
+	return ""
 }

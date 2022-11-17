@@ -98,6 +98,25 @@ func TestTimestampQuery(t *testing.T) {
 	})
 }
 
+func TestOrdinalParameterQuery(t *testing.T) {
+	runTestsWithDB(t, dsn, func(t *testing.T, db *sql.DB) {
+		restore := requireNoErrorLog(t)
+		defer restore()
+		query := `SELECT usesysid, usename FROM pg_user WHERE usename = :1`
+		rows, err := db.QueryContext(context.Background(), query, "rdsdb")
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, rows.Close())
+		}()
+		require.True(t, rows.Next())
+		var userID int64
+		var userName string
+		require.NoError(t, rows.Scan(&userID, &userName))
+		require.Equal(t, int64(1), userID)
+		require.Equal(t, "rdsdb", userName)
+	})
+}
+
 func TestSimpleExec(t *testing.T) {
 	runTestsWithDB(t, dsn, func(t *testing.T, db *sql.DB) {
 		restore := requireNoErrorLog(t)

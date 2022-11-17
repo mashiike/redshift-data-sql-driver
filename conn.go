@@ -53,16 +53,8 @@ func (conn *redshiftDataConn) Begin() (driver.Tx, error) {
 
 func (conn *redshiftDataConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	params := &redshiftdata.ExecuteStatementInput{
-		Sql: nullif(query),
-	}
-	if len(args) > 0 {
-		params.Parameters = make([]types.SqlParameter, 0, len(args))
-		for _, arg := range args {
-			params.Parameters = append(params.Parameters, types.SqlParameter{
-				Name:  aws.String(arg.Name),
-				Value: aws.String(fmt.Sprintf("%v", arg.Value)),
-			})
-		}
+		Sql:        nullif(query),
+		Parameters: convertArgsToParameters(args),
 	}
 	p, output, err := conn.executeStatement(ctx, params)
 	if err != nil {
@@ -74,22 +66,28 @@ func (conn *redshiftDataConn) QueryContext(ctx context.Context, query string, ar
 
 func (conn *redshiftDataConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	params := &redshiftdata.ExecuteStatementInput{
-		Sql: nullif(query),
-	}
-	if len(args) > 0 {
-		params.Parameters = make([]types.SqlParameter, 0, len(args))
-		for _, arg := range args {
-			params.Parameters = append(params.Parameters, types.SqlParameter{
-				Name:  aws.String(arg.Name),
-				Value: aws.String(fmt.Sprintf("%v", arg.Value)),
-			})
-		}
+		Sql:        nullif(query),
+		Parameters: convertArgsToParameters(args),
 	}
 	_, output, err := conn.executeStatement(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 	return newResult(output), nil
+}
+
+func convertArgsToParameters(args []driver.NamedValue) []types.SqlParameter {
+	if len(args) == 0 {
+		return nil
+	}
+	params := make([]types.SqlParameter, 0, len(args))
+	for _, arg := range args {
+		params = append(params, types.SqlParameter{
+			Name:  aws.String(coalesce(nullif(arg.Name), aws.String(fmt.Sprintf("%d", arg.Ordinal)))),
+			Value: aws.String(fmt.Sprintf("%v", arg.Value)),
+		})
+	}
+	return params
 }
 
 func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *redshiftdata.ExecuteStatementInput) (*redshiftdata.GetStatementResultPaginator, *redshiftdata.DescribeStatementOutput, error) {

@@ -66,7 +66,7 @@ func (conn *redshiftDataConn) QueryContext(ctx context.Context, query string, ar
 
 func (conn *redshiftDataConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	params := &redshiftdata.ExecuteStatementInput{
-		Sql:        nullif(query),
+		Sql:        nullif(rewriteQuery(query, len(args))),
 		Parameters: convertArgsToParameters(args),
 	}
 	_, output, err := conn.executeStatement(ctx, params)
@@ -74,6 +74,40 @@ func (conn *redshiftDataConn) ExecContext(ctx context.Context, query string, arg
 		return nil, err
 	}
 	return newResult(output), nil
+}
+
+func rewriteQuery(query string, paramsCount int) string {
+	if paramsCount == 0 {
+		return query
+	}
+	runes := make([]rune, 0, len(query))
+	stack := make([]rune, 0)
+	var exclamationCount int
+	for _, r := range query {
+		if len(stack) > 0 {
+			if r == stack[len(stack)-1] {
+				stack = stack[:len(stack)-1]
+				runes = append(runes, r)
+				continue
+			}
+		} else {
+			switch r {
+			case '?':
+				exclamationCount++
+				runes = append(runes, []rune(fmt.Sprintf(":%d", exclamationCount))...)
+				continue
+			case '$':
+				runes = append(runes, ':')
+				continue
+			}
+		}
+		switch r {
+		case '"', '\'':
+			stack = append(stack, r)
+		}
+		runes = append(runes, r)
+	}
+	return string(runes)
 }
 
 func convertArgsToParameters(args []driver.NamedValue) []types.SqlParameter {

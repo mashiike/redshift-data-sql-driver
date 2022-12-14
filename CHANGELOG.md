@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.1](https://github.com/mashiike/redshift-data-sql-driver/compare/v0.1.0...v0.1.1) - 2022-12-14
+- Bump github.com/aws/aws-sdk-go-v2/service/redshiftdata from 1.16.13 to 1.16.14 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/7
+- Bump github.com/aws/aws-sdk-go-v2 from 1.17.1 to 1.17.2 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/8
+
 ## [v0.1.0](https://github.com/mashiike/redshift-data-sql-driver/compare/v0.0.1...v0.1.0) - 2022-11-17
 - support ordinal parameters by @mashiike in https://github.com/mashiike/redshift-data-sql-driver/pull/3
 - Bump github.com/aws/aws-sdk-go-v2/config from 1.17.11 to 1.18.0 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/2

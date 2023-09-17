@@ -221,7 +221,7 @@ func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *reds
 		return nil, nil, fmt.Errorf("execute statement:%w", err)
 	}
 	queryStart := time.Now()
-	debugLogger.Printf("[%s] sucess execute statement: %s", *executeOutput.Id, coalesce(params.Sql))
+	debugLogger.Printf("[%s] success execute statement: %s", *executeOutput.Id, coalesce(params.Sql))
 	describeOutput, err := conn.waitWithCancel(ctx, executeOutput.Id, queryStart)
 	if err != nil {
 		return nil, nil, err
@@ -258,7 +258,7 @@ func (conn *redshiftDataConn) batchExecuteStatement(ctx context.Context, params 
 		return nil, nil, fmt.Errorf("execute statement:%w", err)
 	}
 	queryStart := time.Now()
-	debugLogger.Printf("[%s] sucess execute statement: %d sqls", *batchExecuteOutput.Id, len(params.Sqls))
+	debugLogger.Printf("[%s] success execute statement: %d sqls", *batchExecuteOutput.Id, len(params.Sqls))
 	describeOutput, err := conn.waitWithCancel(ctx, batchExecuteOutput.Id, queryStart)
 	if err != nil {
 		return nil, nil, err

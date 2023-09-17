@@ -57,10 +57,10 @@ func TestSimpleQuery(t *testing.T) {
 		defer restore()
 		sql := `SELECT 1 as number, 'hoge' as string UNION SELECT 2 as number, 'fuga' as string`
 		rows, err := db.QueryContext(context.Background(), sql)
+		require.NoError(t, err)
 		defer func() {
 			require.NoError(t, rows.Close())
 		}()
-		require.NoError(t, err)
 		require.True(t, rows.Next())
 		columns, err := rows.Columns()
 		require.NoError(t, err)
@@ -86,10 +86,10 @@ func TestTimestampQuery(t *testing.T) {
 			getdate()::timestamp without time zone as without_timezone
 			,getdate()::timestamp with time zone as with_timezone`
 		rows, err := db.QueryContext(context.Background(), query)
+		require.NoError(t, err)
 		defer func() {
 			require.NoError(t, rows.Close())
 		}()
-		require.NoError(t, err)
 		require.True(t, rows.Next())
 		var withoutTimezone, withTimezone sql.NullTime
 		require.NoError(t, rows.Scan(&withoutTimezone, &withTimezone))

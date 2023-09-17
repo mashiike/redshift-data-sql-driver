@@ -146,77 +146,19 @@ func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *reds
 	}
 	queryStart := time.Now()
 	debugLogger.Printf("[%s] sucess execute statement: %s", *executeOutput.Id, coalesce(params.Sql))
-	describeOutput, err := conn.client.DescribeStatement(ectx, &redshiftdata.DescribeStatementInput{
-		Id: executeOutput.Id,
-	})
+	describeOutput, err := conn.waitWithCancel(ctx, executeOutput.Id, queryStart)
 	if err != nil {
-		return nil, nil, fmt.Errorf("describe statement:%w", err)
+		return nil, nil, err
 	}
-	debugLogger.Printf("[%s] describe statement: status=%s pid=%d query_id=%d", *executeOutput.Id, describeOutput.Status, describeOutput.RedshiftPid, describeOutput.RedshiftQueryId)
-
-	var isFinished bool
-	defer func() {
-		if !isFinished {
-			describeOutput, err := conn.client.DescribeStatement(ctx, &redshiftdata.DescribeStatementInput{
-				Id: executeOutput.Id,
-			})
-			if err != nil {
-				errLogger.Printf("[%s] failed describe statement: %v", *executeOutput.Id, err)
-				return
-			}
-			if describeOutput.Status == types.StatusStringFinished ||
-				describeOutput.Status == types.StatusStringFailed ||
-				describeOutput.Status == types.StatusStringAborted {
-				return
-			}
-			debugLogger.Printf("[%s] try cancel statement", *executeOutput.Id)
-			output, err := conn.client.CancelStatement(ctx, &redshiftdata.CancelStatementInput{
-				Id: executeOutput.Id,
-			})
-			if err != nil {
-
-				errLogger.Printf("[%s] failed cancel statement: %v", *executeOutput.Id, err)
-				return
-			}
-			if !*output.Status {
-				debugLogger.Printf("[%s] cancel statement status is false", *executeOutput.Id)
-			}
-		}
-	}()
-	delay := time.NewTimer(conn.cfg.Polling)
-	for {
-		if describeOutput.Status == types.StatusStringAborted {
-			return nil, nil, fmt.Errorf("query aborted: %s", *describeOutput.Error)
-		}
-		if describeOutput.Status == types.StatusStringFailed {
-			return nil, nil, fmt.Errorf("query failed: %s", *describeOutput.Error)
-		}
-		if describeOutput.Status == types.StatusStringFinished {
-			break
-		}
-		debugLogger.Printf("[%s] wating finsih query: elapsed_time=%s", *executeOutput.Id, time.Since(queryStart))
-		delay.Reset(conn.cfg.Polling)
-		select {
-		case <-ectx.Done():
-			if !delay.Stop() {
-				<-delay.C
-			}
-			return nil, nil, ectx.Err()
-		case <-delay.C:
-		case <-conn.aliveCh:
-			if !delay.Stop() {
-				<-delay.C
-			}
-			return nil, nil, ErrConnClosed
-		}
-		describeOutput, err = conn.client.DescribeStatement(ctx, &redshiftdata.DescribeStatementInput{
-			Id: executeOutput.Id,
-		})
-		if err != nil {
-			return nil, nil, fmt.Errorf("describe statement:%w", err)
-		}
+	if describeOutput.Status == types.StatusStringAborted {
+		return nil, nil, fmt.Errorf("query aborted: %s", *describeOutput.Error)
 	}
-	isFinished = true
+	if describeOutput.Status == types.StatusStringFailed {
+		return nil, nil, fmt.Errorf("query failed: %s", *describeOutput.Error)
+	}
+	if describeOutput.Status != types.StatusStringFinished {
+		return nil, nil, fmt.Errorf("query status is not finished: %s", describeOutput.Status)
+	}
 	debugLogger.Printf("[%s] success query: elapsed_time=%s", *executeOutput.Id, time.Since(queryStart))
 	if !*describeOutput.HasResultSet {
 		return nil, describeOutput, nil
@@ -226,4 +168,89 @@ func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *reds
 		Id: executeOutput.Id,
 	})
 	return p, describeOutput, nil
+}
+
+func isFinishedStatus(status types.StatusString) bool {
+	return status == types.StatusStringFinished || status == types.StatusStringFailed || status == types.StatusStringAborted
+}
+
+func (conn *redshiftDataConn) wait(ctx context.Context, id *string, queryStart time.Time) (*redshiftdata.DescribeStatementOutput, error) {
+	timeout := conn.cfg.Timeout
+	if timeout == 0 {
+		timeout = 15 * time.Minute
+	}
+	polling := conn.cfg.Polling
+	if polling == 0 {
+		polling = 10 * time.Millisecond
+	}
+	ectx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	debugLogger.Printf("[%s] wating finsih query: elapsed_time=%s", *id, time.Since(queryStart))
+	describeOutput, err := conn.client.DescribeStatement(ctx, &redshiftdata.DescribeStatementInput{
+		Id: id,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe statement:%w", err)
+	}
+	debugLogger.Printf("[%s] describe statement: status=%s pid=%d query_id=%d", *id, describeOutput.Status, describeOutput.RedshiftPid, describeOutput.RedshiftQueryId)
+	if isFinishedStatus(describeOutput.Status) {
+		return describeOutput, nil
+	}
+	delay := time.NewTimer(polling)
+	for {
+		select {
+		case <-ectx.Done():
+			if !delay.Stop() {
+				<-delay.C
+			}
+			return nil, ectx.Err()
+		case <-delay.C:
+		case <-conn.aliveCh:
+			if !delay.Stop() {
+				<-delay.C
+			}
+			return nil, ErrConnClosed
+		}
+		debugLogger.Printf("[%s] wating finsih query: elapsed_time=%s", *id, time.Since(queryStart))
+		describeOutput, err = conn.client.DescribeStatement(ctx, &redshiftdata.DescribeStatementInput{
+			Id: id,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("describe statement:%w", err)
+		}
+		if isFinishedStatus(describeOutput.Status) {
+			return describeOutput, nil
+		}
+		delay.Reset(polling)
+	}
+}
+
+func (conn *redshiftDataConn) waitWithCancel(ctx context.Context, id *string, queryStart time.Time) (*redshiftdata.DescribeStatementOutput, error) {
+	desc, err := conn.wait(ctx, id, queryStart)
+	cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if desc == nil {
+		var rErr error
+		desc, rErr = conn.client.DescribeStatement(cctx, &redshiftdata.DescribeStatementInput{
+			Id: id,
+		})
+		if rErr != nil {
+			return nil, err
+		}
+	}
+	if isFinishedStatus(desc.Status) {
+		return desc, err
+	}
+	debugLogger.Printf("[%s] try cancel statement", *id)
+	output, cErr := conn.client.CancelStatement(cctx, &redshiftdata.CancelStatementInput{
+		Id: id,
+	})
+	if cErr != nil {
+		errLogger.Printf("[%s] failed cancel statement: %v", *id, err)
+		return desc, err
+	}
+	if !*output.Status {
+		debugLogger.Printf("[%s] cancel statement status is false", *id)
+	}
+	return desc, err
 }

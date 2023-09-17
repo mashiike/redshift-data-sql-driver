@@ -140,10 +140,45 @@ func TestSimpleExec(t *testing.T) {
 			`SELECT * FROM "public"."redshift_data_sql_driver_test" WHERE id = :id`,
 			sql.Named("id", 1),
 		)
+		require.NoError(t, err)
 		defer func() {
 			require.NoError(t, rows.Close())
 		}()
+		require.True(t, rows.Next())
+		var id int64
+		var createdAt sql.NullTime
+		require.NoError(t, rows.Scan(&id, &createdAt))
+		require.Equal(t, int64(1), id)
+		require.True(t, time.Until(createdAt.Time) <= time.Hour)
+	})
+}
+
+func TestTx(t *testing.T) {
+	runTestsWithDB(t, dsn, func(t *testing.T, db *sql.DB) {
+		restore := requireNoErrorLog(t)
+		defer restore()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		tx, err := db.BeginTx(ctx, nil)
 		require.NoError(t, err)
+		_, err = tx.ExecContext(ctx, `DROP TABLE IF EXISTS "public"."redshift_data_sql_driver_test"`)
+		require.NoError(t, err)
+		_, err = tx.ExecContext(ctx, `CREATE TABLE "public"."redshift_data_sql_driver_test" (id BIGINT, created_at TIMESTAMP)`)
+		require.NoError(t, err)
+		result, err := tx.ExecContext(ctx, `INSERT INTO "public"."redshift_data_sql_driver_test" SELECT 1 as id, getdate() as created_at`)
+		require.NoError(t, err)
+		_, err = result.RowsAffected()
+		require.ErrorIs(t, err, ErrBeforeCommit)
+		err = tx.Commit() // BatchExecuteStatement is called here
+		require.NoError(t, err)
+		rows, err := db.QueryContext(ctx, `SELECT * FROM "public"."redshift_data_sql_driver_test" WHERE id = 1`)
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, rows.Close())
+		}()
+		rowsAffected, err := result.RowsAffected()
+		require.NoError(t, err)
+		require.Equal(t, int64(1), rowsAffected)
 		require.True(t, rows.Next())
 		var id int64
 		var createdAt sql.NullTime

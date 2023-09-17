@@ -2,6 +2,7 @@ package redshiftdatasqldriver
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"time"
@@ -16,6 +17,11 @@ type redshiftDataConn struct {
 	cfg      *RedshiftDataConfig
 	aliveCh  chan struct{}
 	isClosed bool
+
+	inTx          bool
+	txOpts        driver.TxOptions
+	sqls          []string
+	delayedResult []*redshiftDataDelayedResult
 }
 
 func newConn(client RedshiftDataClient, cfg *RedshiftDataConfig) *redshiftDataConn {
@@ -44,7 +50,67 @@ func (conn *redshiftDataConn) Close() error {
 }
 
 func (conn *redshiftDataConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	return nil, fmt.Errorf("transaction %w", ErrNotSupported)
+	if conn.inTx {
+		return nil, ErrInTx
+	}
+	if opts.Isolation != driver.IsolationLevel(sql.LevelDefault) {
+		return nil, fmt.Errorf("transaction isolation level change: %w", ErrNotSupported)
+	}
+	conn.inTx = true
+	conn.txOpts = opts
+	cleanup := func() error {
+		conn.inTx = false
+		conn.sqls = nil
+		conn.delayedResult = nil
+		return nil
+	}
+	tx := &redshiftDataTx{
+		onRollback: func() error {
+			if !conn.inTx {
+				return ErrNotInTx
+			}
+			return cleanup()
+		},
+		onCommit: func() error {
+			if !conn.inTx {
+				return ErrNotInTx
+			}
+			if len(conn.sqls) == 0 {
+				return cleanup()
+			}
+			if len(conn.sqls) != len(conn.delayedResult) {
+				panic(fmt.Sprintf("sqls and delayedResult length is not match: sqls=%d delayedResult=%d", len(conn.sqls), len(conn.delayedResult)))
+			}
+			if len(conn.sqls) == 1 {
+				result, err := conn.ExecContext(ctx, conn.sqls[0], []driver.NamedValue{})
+				if err != nil {
+					return err
+				}
+				if conn.delayedResult[0] != nil {
+					conn.delayedResult[0].Result = result
+				}
+				return nil
+			}
+			input := &redshiftdata.BatchExecuteStatementInput{
+				Sqls: append(make([]string, 0, len(conn.sqls)), conn.sqls...),
+			}
+			_, desc, err := conn.batchExecuteStatement(ctx, input)
+			if err != nil {
+				return err
+			}
+			for i := range input.Sqls {
+				if i >= len(desc.SubStatements) {
+					return fmt.Errorf("sub statement not found: %d", i)
+				}
+				if conn.delayedResult[i] != nil {
+					conn.delayedResult[i].Result = newResultWithSubStatementData(desc.SubStatements[i])
+				}
+			}
+			return cleanup()
+		},
+	}
+
+	return tx, nil
 }
 
 func (conn *redshiftDataConn) Begin() (driver.Tx, error) {
@@ -52,8 +118,12 @@ func (conn *redshiftDataConn) Begin() (driver.Tx, error) {
 }
 
 func (conn *redshiftDataConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if conn.inTx {
+		return nil, fmt.Errorf("query in transaction: %w", ErrNotSupported)
+	}
+
 	params := &redshiftdata.ExecuteStatementInput{
-		Sql:        nullif(query),
+		Sql:        nullif(rewriteQuery(query, len(args))),
 		Parameters: convertArgsToParameters(args),
 	}
 	p, output, err := conn.executeStatement(ctx, params)
@@ -65,6 +135,20 @@ func (conn *redshiftDataConn) QueryContext(ctx context.Context, query string, ar
 }
 
 func (conn *redshiftDataConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if conn.inTx {
+		if len(args) > 0 {
+			return nil, fmt.Errorf("exec with args in transaction: %w", ErrNotSupported)
+		}
+		if conn.txOpts.ReadOnly {
+			return nil, fmt.Errorf("exec in read only transaction: %w", ErrNotSupported)
+		}
+		conn.sqls = append(conn.sqls, query)
+		result := &redshiftDataDelayedResult{}
+		conn.delayedResult = append(conn.delayedResult, result)
+		debugLogger.Printf("delayedResult[%d] creaed for %q", len(conn.delayedResult)-1, query)
+		return result, nil
+	}
+
 	params := &redshiftdata.ExecuteStatementInput{
 		Sql:        nullif(rewriteQuery(query, len(args))),
 		Parameters: convertArgsToParameters(args),
@@ -132,15 +216,7 @@ func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *reds
 	params.WorkgroupName = conn.cfg.WorkgroupName
 	params.SecretArn = conn.cfg.SecretsARN
 
-	if conn.cfg.Timeout == 0 {
-		conn.cfg.Timeout = 15 * time.Minute
-	}
-	if conn.cfg.Polling == 0 {
-		conn.cfg.Polling = 10 * time.Millisecond
-	}
-	ectx, cancel := context.WithTimeout(ctx, conn.cfg.Timeout)
-	defer cancel()
-	executeOutput, err := conn.client.ExecuteStatement(ectx, params)
+	executeOutput, err := conn.client.ExecuteStatement(ctx, params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execute statement:%w", err)
 	}
@@ -168,6 +244,45 @@ func (conn *redshiftDataConn) executeStatement(ctx context.Context, params *reds
 		Id: executeOutput.Id,
 	})
 	return p, describeOutput, nil
+}
+
+func (conn *redshiftDataConn) batchExecuteStatement(ctx context.Context, params *redshiftdata.BatchExecuteStatementInput) ([]*redshiftdata.GetStatementResultPaginator, *redshiftdata.DescribeStatementOutput, error) {
+	params.ClusterIdentifier = conn.cfg.ClusterIdentifier
+	params.Database = conn.cfg.Database
+	params.DbUser = conn.cfg.DbUser
+	params.WorkgroupName = conn.cfg.WorkgroupName
+	params.SecretArn = conn.cfg.SecretsARN
+
+	batchExecuteOutput, err := conn.client.BatchExecuteStatement(ctx, params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execute statement:%w", err)
+	}
+	queryStart := time.Now()
+	debugLogger.Printf("[%s] sucess execute statement: %d sqls", *batchExecuteOutput.Id, len(params.Sqls))
+	describeOutput, err := conn.waitWithCancel(ctx, batchExecuteOutput.Id, queryStart)
+	if err != nil {
+		return nil, nil, err
+	}
+	if describeOutput.Status == types.StatusStringAborted {
+		return nil, nil, fmt.Errorf("query aborted: %s", *describeOutput.Error)
+	}
+	if describeOutput.Status == types.StatusStringFailed {
+		return nil, nil, fmt.Errorf("query failed: %s", *describeOutput.Error)
+	}
+	if describeOutput.Status != types.StatusStringFinished {
+		return nil, nil, fmt.Errorf("query status is not finished: %s", describeOutput.Status)
+	}
+	debugLogger.Printf("[%s] success query: elapsed_time=%s", *batchExecuteOutput.Id, time.Since(queryStart))
+	ps := make([]*redshiftdata.GetStatementResultPaginator, len(params.Sqls))
+	for i, st := range describeOutput.SubStatements {
+		if *st.HasResultSet {
+			continue
+		}
+		ps[i] = redshiftdata.NewGetStatementResultPaginator(conn.client, &redshiftdata.GetStatementResultInput{
+			Id: st.Id,
+		})
+	}
+	return ps, describeOutput, nil
 }
 
 func isFinishedStatus(status types.StatusString) bool {

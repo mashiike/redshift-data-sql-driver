@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.21.0
 	github.com/aws/aws-sdk-go-v2/config v1.18.39
 	github.com/aws/aws-sdk-go-v2/service/redshiftdata v1.20.5
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.8.4
 )
 
 require (

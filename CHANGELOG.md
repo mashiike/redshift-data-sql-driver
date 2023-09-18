@@ -1,5 +1,8 @@
 # Changelog
 
+## [v0.2.1](https://github.com/mashiike/redshift-data-sql-driver/compare/v0.2.0...v0.2.1) - 2023-09-18
+- Bump actions/checkout from 3 to 4 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/33
+
 ## [v0.2.0](https://github.com/mashiike/redshift-data-sql-driver/compare/v0.1.0...v0.2.0) - 2023-09-17
 - Bump github.com/aws/aws-sdk-go-v2/service/redshiftdata from 1.16.13 to 1.16.14 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/7
 - Bump github.com/aws/aws-sdk-go-v2 from 1.17.1 to 1.17.2 by @dependabot in https://github.com/mashiike/redshift-data-sql-driver/pull/8
